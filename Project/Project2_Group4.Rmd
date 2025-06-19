@@ -1,0 +1,1087 @@
+---
+title: "Group 4 Project 2"
+author: "Alanna Hazlett, Etienne Jimenez, Venkat Viswanathan"
+date: "2024-07-18"
+output: html_document
+---
+
+```{r}
+# | message: FALSE
+library(tidyverse)
+library(tidymodels)
+library(reshape2) # for melt function needed for graph
+library(patchwork)
+library(ggcorrplot)
+library(probably)  # for threshold_perf
+library(vip) #For Variable importance
+library(ranger) #For Random Forest
+library(bonsai) #For Boosting & Random Forest
+library(discrim)
+library(doParallel)
+library(kknn)
+library(GGally)
+```
+
+Load Data
+```{r `show_col_types = FALSE`}
+# | message: FALSE
+# | warning: FALSE
+training_data<-read_csv("HaitiPixels.csv", show_col_types = FALSE)
+training_data<-training_data %>% 
+    mutate(Class = as.factor(Class))
+
+set1<-read_table("orthovnir057_ROI_NON_Blue_Tarps.txt", skip=8, col_names=FALSE, show_col_types = FALSE)
+set_1<-set1[-c(1:7)] %>% 
+       mutate(Class= "NotBlueTarp")
+colnames(set_1)<-c("B1","B2","B3","Class")
+
+set2<-read_table("orthovnir078_ROI_Blue_Tarps.txt", skip=8, col_names=FALSE, show_col_types = FALSE)
+set_2<-set2[-c(1:7)] %>% 
+       mutate(Class="BlueTarp")
+colnames(set_2)<-c("B1","B2","B3","Class")
+
+set3<-read_table("orthovnir069_ROI_NOT_Blue_Tarps.txt", skip=8, col_names=FALSE, show_col_types = FALSE)
+set_3<-set3[-c(1:7)] %>% 
+       mutate(Class="NotBlueTarp")
+colnames(set_3)<-c("B1","B2","B3","Class")
+
+set4<-read_table("orthovnir069_ROI_Blue_Tarps.txt", skip=8, col_names=FALSE, show_col_types = FALSE)
+set_4<-set4[-c(1:7)] %>% 
+       mutate(Class="BlueTarp")
+colnames(set_4)<-c("B1","B2","B3","Class")
+
+set5<-read_table("orthovnir067_ROI_NOT_Blue_Tarps.txt", skip=8, col_names=FALSE, show_col_types = FALSE)
+set_5<-set5[-c(1:7)] %>% 
+       mutate(Class="NotBlueTarp")
+colnames(set_5)<-c("B1","B2","B3","Class")
+
+set6<-read_table("orthovnir067_ROI_Blue_Tarps.txt", skip=8, col_names=FALSE, show_col_types = FALSE)
+set_6<-set6[-c(1:7)] %>% 
+       mutate(Class="BlueTarp")
+colnames(set_6)<-c("B1","B2","B3","Class")
+
+set7<-read_table("orthovnir078_ROI_NON_Blue_Tarps.txt", skip=8, col_names=FALSE, show_col_types = FALSE)
+set_7<-set7[-c(1:7)] %>% 
+       mutate(Class="NotBlueTarp")
+colnames(set_7)<-c("B1","B2","B3","Class")
+
+
+#Same as set 6 
+#set8<-read_table("orthovnir067_ROI_Blue_Tarps_data.txt")
+#set_8<-set8[-c(4)]
+#colnames(set_8)<-c("B1","B2","B3")
+
+holdout <- rbind(set_1, set_2, set_3, set_4, set_5, set_6, set_7)
+#colnames(holdout) <- c("X", "Y", "Map X", "Map Y", "Lat", "Lon", "B1", "B2", "B3")
+```
+
+```{r}
+summary(training_data)
+#There are no missing values
+#training_data[!complete.cases(training_data),]
+
+```
+EDA with original dataset
+```{r}
+#| fig.width: 15
+#| fig.height: 5
+#| dv: "png"
+data_long<-training_data %>% 
+  reshape2::melt()
+g1<-ggplot(training_data,aes(x=Class))+
+  geom_bar()+
+  labs(title="Count of Class")
+g2<-training_data %>% 
+  group_by(Class) %>% 
+  summarize(counts=n()) %>% 
+  mutate(percent=counts/nrow(training_data)) %>% 
+    ggplot(aes(x=Class,y=percent))+
+      geom_bar(stat="identity")+
+      labs(x="Class",y="Proportion",title="Proportion of Class of Images")  
+g3<-ggplot(training_data,aes(x=Red))+
+  geom_histogram(bins=15,fill="red")+
+  labs(title="Distribution of Red")
+g4<-ggplot(training_data,aes(x=Green))+
+  geom_histogram(bins=15,fill="green")+
+  labs(title="Distribution of Green")
+g5<-ggplot(training_data,aes(x=Blue))+
+  geom_histogram(bins=15,fill="blue")+
+  labs(title="Distribution of Blue")
+g6<-training_data %>% 
+  melt() %>% 
+  mutate(Color=as.factor(variable)) %>% 
+  ggplot( aes(x=Class, y=value, fill=Color))+
+  geom_boxplot()+
+  labs(x="Class", y="Value", title="Training Data Distribution of Color Value by Class")+
+  theme(legend.position=c(0.9, 0.75))
+
+g1 + g2 
+
+g6
+```
+```{r}
+#| fig.width: 15
+#| fig.height: 5
+g7<-training_data %>% 
+  melt() %>% 
+  mutate(Color=as.factor(variable)) %>% 
+  ggplot( aes(x=Class, y=value, fill=Color))+
+  geom_violin()+
+  labs(x="Class", y="Value", title="Training Data Distribution of Color Value by Class")+
+  theme(legend.position=c(0.9, 0.75))
+g7
+```
+```{r}
+ggpairs(training_data, 
+    lower=list(combo=wrap("facethist", binwidth=0.5)))
+```
+
+
+```{r}
+#| fig.width: 8
+#| fig.height: 4
+#Get rid of scientific notation
+options(scipen=999)
+gh1<-ggplot(holdout,aes(x=B1))+
+  geom_histogram(bins=15)+
+  labs(title="Distribution of B1")
+gh2<-ggplot(holdout,aes(x=B2))+
+  geom_histogram(bins=15)+
+  labs(title="Distribution of B2")
+gh3<-ggplot(holdout,aes(x=B3))+
+  geom_histogram(bins=15)+
+  labs(title="Distribution of B3")
+
+g3 + gh1 #Maybe Red, large count near 250, most density around 50-125
+g4 + gh2 #Maybe green, compared to B3 this does have significant count near 250. I propose green is more likely to retain higher pixel values than blue due to it's presence in nature. 
+g5 + gh3 #Maybe blue majority of density is lower for B3 than for B1 or B2. 
+```
+\
+* B1 appears similar to Red in distribution, there is a large count near 250 with most density around 50-125 pixels.
+* B2 appears similar to Green in distribution. B2 compared to B3 has a more significant count near 250. We propose green is more likely to retain higher pixel values than blue due to it's presence in nature. B2's highest density is a higher pixel value that of B3, which aligns with Green and Blue respectively. 
+* B3 appears similar to Blue in distribution. For Blue the majority of density is lower than Red or Green and this holds true for B3 compared to B1 or B2. 
+
+```{r}
+#| fig.width: 10
+#| fig.height: 4
+cum_dist1<-training_data %>% 
+              melt() %>% 
+            ggplot(aes(value, colour = variable)) +
+            stat_ecdf()
+cum_dist2<-holdout %>% 
+              melt() %>% 
+            ggplot(aes(value, colour = variable)) +
+            stat_ecdf()
+cum_dist1 + cum_dist2
+```
+
+
+Testing proportions of predictor variables
+```{r}
+# try out the holdout set and find some proportions to identify the three colors
+copy<-holdout
+colnames(copy)<-c("B1", "B2", "B3")
+
+## for the training data
+training_data_copy<-training_data
+
+prop_red<-training_data_copy[which((training_data_copy$Red > training_data_copy$Blue) & (training_data_copy$Red > training_data_copy$Green)),]
+
+prop_green<- training_data_copy[which(( training_data_copy$Green >  training_data_copy$Blue) & ( training_data_copy$Green >  training_data_copy$Red)),]
+
+prop_blue<- training_data_copy[which(( training_data_copy$Blue >  training_data_copy$Red) &  training_data_copy$Blue>  training_data_copy$Green),]
+
+longlive_Red<-nrow(prop_red)[1]/nrow( training_data_copy)[1]
+
+longlive_Green<-nrow(prop_green)[1]/nrow( training_data_copy)[1]
+
+
+## testing data sets containing observations where the highlighted color is the 
+## dominant one
+prop_B1<-copy[which((copy$B1 > copy$B2) & (copy$B1 > copy$B3)),]
+prop_B2<-copy[which((copy$B2 > copy$B1) & (copy$B2 > copy$B3)),]
+prop_B3<-copy[which((copy$B3 > copy$B1) & (copy$B3 > copy$B2)),]
+
+
+## we find the proportion of observations where B1 is dominating over the total number of observations
+longlive_B1<-nrow(prop_B1)[1]/nrow(copy)[1]
+longlive_B1
+
+## ditto for B2
+longlive_B2<-nrow(prop_B2)[1]/nrow(copy)[1]
+longlive_B2
+
+## ditto for B3
+longlive_B3<-nrow(prop_B3)[1]/nrow(copy)[1]
+longlive_B3
+
+## remainder
+1-(longlive_B1+longlive_B2)
+
+## When compared to the original training set, we now confirm
+## B1 is red, B2 equals green, B3 is blue
+longlive_Red
+longlive_Green
+```
+
+
+Adjust Holdout Set to assign Red, Green, Blue to B1, B2, and B3. 
+```{r}
+#New name = Old name
+holdout<-rename(holdout, Red = B1)
+holdout<-rename(holdout, Green = B2)
+holdout<-rename(holdout, Blue = B3)
+```
+
+Make computing cluster
+```{r}
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+
+Define Binary Response
+```{r}
+binary_training_data<-training_data %>% 
+  mutate(Class = as.factor(ifelse(Class=="Blue Tarp","BlueTarp","NotBlueTarp")))
+summary(binary_training_data)
+```
+
+EDA with binary response
+```{r}
+#| fig.width: 12
+#| fig.height: 4
+g9<-ggplot(binary_training_data,aes(x=Green,y=Red,color=Class))+
+  geom_point(alpha=0.1,size=0.5)+
+  scale_color_manual(values= c("BlueTarp"="blue",
+                               "NotBlueTarp"="antiquewhite4"))+
+  labs(title="Red & Green by Classes")+
+        theme(legend.position=c(0.75, 0.15))#"right")
+g9
+g10<-ggplot(binary_training_data,aes(x=Blue,y=Red,color=Class))+
+  geom_point(alpha=0.1,size = 0.5)+
+  scale_color_manual(values= c("BlueTarp"="blue",
+                               "NotBlueTarp"="antiquewhite4"))+
+  labs(title="Red & Blue by Classes")+
+        theme(legend.position=c(0.75, 0.15))#"right")
+g10
+g11<-ggplot(binary_training_data,aes(x=Blue,y=Green,color=Class))+
+  geom_point(alpha=0.1,size = 0.5)+
+  scale_color_manual(values= c("BlueTarp"="blue",
+                               "NotBlueTarp"="antiquewhite4"))+
+  labs(title="Blue & Green by Classes")+
+        theme(legend.position=c(0.75, 0.15))#"right")
+g9 + g10 + g11
+```
+
+```{r}
+ggpairs(binary_training_data, 
+    lower=list(combo=wrap("facethist", binwidth=0.5)))
+```
+
+```{r}
+#library(ggcorrplot)
+model.matrix(~0+., data=binary_training_data) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(show.diag=FALSE, type="lower", lab=TRUE, lab_size=2)
+```
+
+Train the Models - Logistic Regression, LDA, QDA
+```{r}
+formula <- Class ~ `Red` + `Green` + `Blue`
+haiti_recipe <- recipe(formula, data=binary_training_data) %>%
+    step_normalize(all_numeric_predictors())
+logreg_spec <- logistic_reg(mode="classification") %>%
+      set_engine('glm')
+lda_spec <- discrim_linear(mode="classification") %>%
+      set_engine('MASS')
+qda_spec <- discrim_quad(mode="classification") %>%
+      set_engine('MASS')
+```
+
+Combine preprocessing steps and model specification in workflow
+```{r}
+logreg_wf <- workflow() %>%
+    add_recipe(haiti_recipe) %>%
+    add_model(logreg_spec)
+lda_wf <- workflow() %>%
+    add_recipe(haiti_recipe) %>%
+    add_model(lda_spec)
+qda_wf <- workflow() %>%
+    add_recipe(haiti_recipe) %>%
+    add_model(qda_spec)
+```
+
+Cross-validation for model selection
+- 10-fold cross-validation using stratified sampling
+- Measure performance using ROC-AUC
+- Save resample predictions, so that we can build ROC curves using cross-validation results
+```{r}
+set.seed(123)
+resamples <- vfold_cv(binary_training_data, v=10, strata=Class)
+model_metrics <- metric_set(roc_auc, accuracy,kap,j_index,sensitivity, specificity)
+
+#When it performs resampling, default setting does not keep any info about results of each fold. Later when you want to do ROC Curve for cross validation results, you need the predictions. This specifies that you save the predictions. 
+cv_control <- control_resamples(save_pred=TRUE)
+```
+
+Cross-validation
+```{r cross-validation}
+logreg_cv <- fit_resamples(logreg_wf, resamples, metrics=model_metrics, control=cv_control)
+lda_cv <- fit_resamples(lda_wf, resamples, metrics=model_metrics, control=cv_control)
+qda_cv <- fit_resamples(qda_wf, resamples, metrics=model_metrics, control=cv_control)
+
+#Collect predictions for use in threshold selection
+logreg_cv_preds<-collect_predictions(logreg_cv)
+lda_cv_preds<-collect_predictions(lda_cv)
+qda_cv_preds<-collect_predictions(qda_cv)
+```
+CV Metrics Table
+```{r cv-metrics-table}
+cv_metrics <- bind_rows(
+        collect_metrics(logreg_cv) %>% mutate(model="Logistic regression"),
+        collect_metrics(lda_cv) %>% mutate(model="LDA"),
+        collect_metrics(qda_cv) %>% mutate(model="QDA")
+    ) 
+cv_metrics %>% 
+    select(model, .metric, mean) %>%
+    pivot_wider(names_from=".metric", values_from="mean") %>%
+    knitr::kable(caption="Cross-validation performance metrics", digits=3)
+```
+\
+Visualization of CV Metrics
+```{r cv-metrics-figure}
+#| fig.cap: Cross-validation performance metrics
+#| fig.width: 6
+#| fig.height: 3
+#| out.width: 75%
+ggplot(cv_metrics, aes(x=mean, y=model, xmin=mean-std_err, xmax=mean+std_err)) +
+    geom_point() + 
+    geom_linerange() +
+    facet_wrap(~ .metric)
+```
+\
+Conclusions:\
+* QDA: Seems to perform second best on the training data across all metrics.\
+* Logistic: Appears to perform the best across all metrics.\
+* LDA: Performed the worst across all metrics. 
+
+* We know that accuracy is not going to be a good measure for this data, since it is an imbalanced dataset. We are better off using j index which has a better balance 
+
+Overlayed ROC Curves for CV
+```{r cv-roc-curves-overlay}
+#| fig.width: 12
+#| fig.height: 4
+#| fig.cap: Overlay of cross-validation ROC curves
+roc_cv_data <- function(model_cv) {
+    cv_predictions <- collect_predictions(model_cv)
+    cv_predictions %>% 
+        roc_curve(truth=Class, .pred_BlueTarp, event_level="first")
+}
+g1 = bind_rows(
+    roc_cv_data(logreg_cv) %>% mutate(model="Logistic regression"),
+    roc_cv_data(lda_cv) %>% mutate(model="LDA"),
+    roc_cv_data(qda_cv) %>% mutate(model="QDA")
+) %>%
+ggplot(aes(x=1-specificity, y=sensitivity, color=model)) +
+    geom_line()
+g2 = g1 + coord_cartesian(xlim=c(0,0.25),ylim=c(0.75,1.0)) +
+  theme(legend.position=c(0.75, 0.25))
+g1 + g2 
+```
+
+Fit the Models - Logistic Regression, LDA, QDA
+```{r}
+logreg_fit<-logreg_wf %>% fit(binary_training_data)
+LDA_fit<-lda_wf %>% fit(binary_training_data)
+QDA_fit<-qda_wf %>% fit(binary_training_data)
+```
+
+For each model, determine the threshold that maximizes the J-index using the training set. Why is the J-index a better metric than accuracy in this case? Create plots that show the dependence of the J-index from the threshold. 
+```{r}
+#| fig.cap: Table 2
+#| out.width: 75%
+performance_logreg<-probably::threshold_perf(logreg_cv_preds, Class, .pred_BlueTarp, 
+                    thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                    metrics=metric_set(j_index))
+logreg_max_j_index <- performance_logreg %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+performance_LDA<-probably::threshold_perf(lda_cv_preds, Class, .pred_BlueTarp, 
+                 thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                 metrics=metric_set(j_index))
+LDA_max_j_index <- performance_LDA %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+
+performance_QDA<-probably::threshold_perf(qda_cv_preds, Class, .pred_BlueTarp, 
+                 thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                 metrics=metric_set(j_index))
+QDA_max_j_index <- performance_QDA %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+Names<-c("Logistic Regression","LDA","QDA")
+
+metrics_table <- function(metrics, caption) {
+  metrics %>%
+      pivot_wider(names_from=.metric, values_from=.estimate) %>%
+      select(-.estimator) %>%
+      knitr::kable(caption=caption, digits=5) %>%
+      kableExtra::kable_styling(full_width=FALSE)
+}
+
+#Save Threshold values
+logreg_thresh<-logreg_max_j_index$.threshold
+LDA_thresh<-LDA_max_j_index$.threshold
+QDA_thresh<-QDA_max_j_index$.threshold
+
+metrics_table(bind_cols(Names, bind_rows(logreg_max_j_index,LDA_max_j_index,QDA_max_j_index)),
+              "Thresholds")
+```
+
+Determine the accuracy, sensitivity, specificity, and J-index for each model at the determined thresholds. Which model performs best? How does this compare to the result from the ROC curves?
+```{r augmenting dataset for each model}
+augment_model<-function(model,data,thresh_level){
+  model %>% 
+    augment(data) %>% 
+    mutate(pred=as.factor(ifelse(.pred_BlueTarp>= thresh_level,"BlueTarp","NotBlueTarp")))
+}
+final_logreg<-augment_model(logreg_fit,binary_training_data,logreg_thresh)
+final_LDA<-augment_model(LDA_fit,binary_training_data,LDA_thresh)
+final_QDA<-augment_model(QDA_fit,binary_training_data,QDA_thresh)
+
+
+holdout_logreg<-augment_model(logreg_fit,holdout,logreg_thresh)
+holdout_LDA<-augment_model(LDA_fit,holdout,LDA_thresh)
+holdout_QDA<-augment_model(QDA_fit,holdout,QDA_thresh)
+```   
+
+
+```{r}
+#This outputs a function
+class_metrics<-metric_set(accuracy,sensitivity,specificity,j_index)
+calculate_metrics <- function(model, train, test, model_name,thresh_level) {
+    roc_auc(model %>% augment(train), Class, .pred_BlueTarp, event_level="first")
+    bind_rows(
+        bind_cols(
+            model=model_name,
+            dataset="train",
+            class_metrics(model %>% augment_model(train,thresh_level), 
+                          truth=Class, 
+                          estimate=pred),
+        ),
+        bind_cols(
+            model=model_name,
+            dataset="train",
+            roc_auc(model %>% augment_model(train,thresh_level),
+                    Class,
+                    .pred_BlueTarp,
+                    event_level="first"),
+        )
+    )
+}
+```
+
+Train Metrics
+```{r}
+#accuracy, sensitivity, specificity, and J-index
+ASSJ<-bind_rows(calculate_metrics(logreg_fit,binary_training_data,holdout,"Logistic",logreg_thresh),
+          calculate_metrics(LDA_fit,binary_training_data,holdout,"LDA",LDA_thresh),
+          calculate_metrics(QDA_fit,binary_training_data,holdout,"QDA",QDA_thresh))
+metrics_table(ASSJ,"Threshold Metrics")
+```
+
+Similarly to the ROC Curves prior to determining the threshold LDA overall performs the worst on the training data. Logistic and QDA are once again more difficult to determine with some metrics pointing toward one model and others pointing to the other model. We know our dataset is very imbalanced and so the results of accuracy should not be taken into account. We are more concerned with the other remaining metrics. QDA has a higher sensitivity (True Positive Rate), which indicates that it is more likely to correctly classify the blue tarps when they truly are blue tarps. This means in comparison that Logisitic Regression would be more likely to miss some blue tarps than QDA. Logistic Regression has a higher specificity (True Negative Rate), which indicates that it is more likely to correctly classify the not blue tarps when they are truly not blue tarps. This means that in comparison that QDA would be more likely to miss some not blue tarps than Logisitic Regression. The ROC AUC is relatively the same from cross validation and from threshold selection. 
+
+```{r comparison-graph}
+#| fig.cap: Distribution of the predicted probability for the BlueTarp and NotBlueTarp classes for the three classification models 
+#| fig.width: 16
+#| fig.height: 4
+#| out.width: 100%
+distribution_graph <- function(model, data, model_name) {
+    model %>% 
+        augment(data) %>%
+    ggplot(aes(x=.pred_BlueTarp,color=.pred_class)) +
+        geom_density(bw=0.07) +
+        labs(x='Probability of Blue Tarp', title=model_name) + 
+        scale_color_manual(breaks=c("BlueTarp","NotBlueTarp"), values=c("blue","red"))+
+        theme(legend.position=c(0.5, 0.75))#"right")
+}
+g1 <- distribution_graph(logreg_fit, holdout, "Logistic regression")
+g2 <- distribution_graph(LDA_fit, holdout, "LDA")
+g3 <- distribution_graph(QDA_fit, holdout, "QDA")
+g1 + g2 + g3
+```
+
+LDA and QDA look relatively similar. Logistic, however looks different, this will lead to a different optimal threshold value.
+
+Proportion of Blue Tarp Identified in Holdout
+```{r}
+logreg_prop<-nrow(holdout_logreg[which(holdout_logreg$pred == "BlueTarp"),]) / nrow(holdout_logreg)
+LDA_prop<-nrow(holdout_LDA[which(holdout_LDA$pred == "BlueTarp"),]) / nrow(holdout_LDA)
+QDA_prop<-nrow(holdout_QDA[which(holdout_QDA$pred == "BlueTarp"),]) / nrow(holdout_QDA)
+logreg_prop
+LDA_prop
+QDA_prop
+```
+
+--------------------------------------------------------------------------------------------------------------------------------------------
+
+**KNN (K-nearest neighbor) with # of neighbors tuning - Module 8**
+```{r}
+library(kknn)
+knn_spec<- nearest_neighbor(mode="classification", neighbors=tune()) %>% 
+            set_engine("kknn")
+knn_wf<-workflow() %>% 
+        add_recipe(haiti_recipe) %>% 
+        add_model(knn_spec)
+knn_params<-extract_parameter_set_dials(knn_wf) %>% 
+            update(neighbors = neighbors(c(1,8)))
+set.seed(123)
+tune_results_knn<-tune_bayes(knn_wf,
+                              resamples=resamples,
+                              param_info=knn_params,
+                              iter=25)
+```
+
+```{r}
+#| fig.width: 4
+#| fig.height: 8
+autoplot(tune_results_knn)
+```
+
+```{r}
+show_best(tune_results_knn,metric='roc_auc',n=1)
+tuned_knn_model<-finalize_workflow(knn_wf, select_best(tune_results_knn,metric='roc_auc')) %>% 
+                                  fit(binary_training_data)
+```
+
+
+
+
+
+**Penalized Logistic Regression (elastic net penalty) - Module 5**
+**Elasticnet just means you are tuning both penalty and mixture**
+```{r}
+#previously defined 
+#formula <- Class ~ `Red` + `Green` + `Blue`
+
+#Recipe previously defined
+
+#Engine choice: glmnet allows tuning with penalty and mixture
+tuned_logreg_spec <- logistic_reg(engine="glmnet", mode="classification",
+                      penalty=tune(),mixture=tune())
+
+tuned_logreg_wf<-workflow() %>% 
+                add_recipe(haiti_recipe) %>% 
+                add_model(tuned_logreg_spec)
+```
+
+```{r}
+#Assumes penalty is between [-10,0]
+tuned_logreg_params <- extract_parameter_set_dials(tuned_logreg_wf)  %>% 
+                        update(penalty=penalty(c(-10, -4)),
+                               mixture = mixture(c(0.25,1)))
+set.seed(123)
+tune_results_logreg<-tune_bayes(tuned_logreg_wf,
+                                resamples=resamples,
+                                param_info=tuned_logreg_params,
+                                iter=25)
+```
+
+```{r}
+#| fig.width: 6
+#| fig.height: 8
+autoplot(tune_results_logreg)
+```
+
+```{r}
+show_best(tune_results_logreg,metric='roc_auc',n=1)
+tuned_logreg_model<-finalize_workflow(tuned_logreg_wf, select_best(tune_results_logreg,metric='roc_auc')) %>% 
+                                  fit(binary_training_data)
+```
+
+
+
+
+
+**Random forest - Module 8**
+```{r}
+#| fig.width: 8
+#| fig.height: 8
+#| fig.cap: Random Forest Tuning Plot
+
+#library(vip) #For Variable importance
+#library(ranger) #For Random Forest
+#library(bonsai) #For Boosting & Random Forest
+
+rf_spec<-rand_forest(mode="classification", mtry=tune(), min_n=tune()) %>%
+    set_engine("ranger", importance="impurity")
+
+rf_wf <- workflow() %>%
+         add_recipe(haiti_recipe) %>%
+         add_model(rf_spec)
+
+rf_parameters <- extract_parameter_set_dials(rf_wf) %>%                                             #default min_n [2, 40]
+                  update(mtry = mtry(c(1, 3)),
+                         min_n = min_n(c(2,20)))  #We only have 3 predictors available to begin with
+set.seed(123)
+rf_tune <- tune_bayes(rf_wf,resamples=resamples,
+                      metrics=model_metrics,
+                      param_info=rf_parameters,
+                      iter=25)
+```
+
+```{r}
+#| fig.width: 6
+#| fig.height: 10
+#Returns roc_auc, accuracy,kap,j_index across different values of mtry and min_n
+autoplot(rf_tune)
+```
+
+```{r}
+show_best(rf_tune,metric='roc_auc',n=1)
+best_rf_model <- finalize_workflow(rf_wf, select_best(rf_tune, metric="roc_auc")) %>% 
+                                  fit(binary_training_data)
+```
+
+
+
+
+
+**Support vector machine - Linear - Module 9** 
+```{r}
+#library(kernlab) - needed for SVM engines
+lin_spec<-svm_linear(mode="classification", cost=tune(), margin=tune()) %>%
+          set_engine("kernlab")
+lin_wf<-workflow() %>% 
+        add_recipe(haiti_recipe) %>% 
+        add_model(lin_spec)
+lin_params<-extract_parameter_set_dials(lin_wf) #%>% #defaults cost [-10,5], margin [0,0.2]
+            #update(margin = margin(c(0, 0.5)))
+
+set.seed(123)
+tune_results_lin<-tune_bayes(lin_wf,
+                             resamples=resamples,
+                             metrics=model_metrics,
+                             param_info=lin_params,
+                             iter=50)
+```
+
+```{r}
+#| fig.width: 6
+#| fig.height: 10
+options(scipen=999)
+autoplot(tune_results_lin)
+```
+
+```{r}
+show_best(tune_results_lin, metric='roc_auc', n=1)
+finalized_lin_wf<-lin_wf %>% 
+                  finalize_workflow(select_best(tune_results_lin, metric="roc_auc"))
+lin_model<- finalized_lin_wf%>%
+              fit(binary_training_data)
+```
+
+
+
+
+**Support vector machine - Polynomial - Module 9**
+```{r}
+poly_spec<-svm_poly(mode="classification", cost=tune(), margin=tune(), degree=tune()) %>%
+                    set_engine("kernlab")
+poly_wf<-workflow() %>% 
+        add_recipe(haiti_recipe) %>% 
+        add_model(poly_spec)
+
+
+poly_params<-extract_parameter_set_dials(poly_wf)# %>% 
+              #update(degree = degree (c(1, 5)))   #defaults: cost (transformed scale): [-10, 5], degree [1, 3], margin [0, 0.2]
+
+set.seed(123)
+tune_results_poly<-tune_bayes(poly_wf,
+                             resamples=resamples,
+                             metrics=model_metrics,
+                             param_info=poly_params,
+                             iter=50)
+```
+
+```{r}
+#| fig.width: 9
+#| fig.height: 10
+options(scipen=999)
+autoplot(tune_results_poly)
+```
+
+```{r}
+show_best(tune_results_poly, metric='roc_auc', n=1)
+finalized_poly_wf<-poly_wf %>% 
+                  finalize_workflow(select_best(tune_results_poly, metric="roc_auc"))
+poly_model<- finalized_poly_wf%>%
+            fit(binary_training_data)
+```
+
+
+
+
+**Support vector machine - Radial Basis Function - Module 9** 
+```{r}
+rbf_spec<-svm_rbf(mode="classification", cost=tune(), margin=tune(), rbf_sigma=tune()) %>%
+                    set_engine("kernlab")
+rbf_wf<-workflow() %>% 
+        add_recipe(haiti_recipe) %>% 
+        add_model(rbf_spec)
+rbf_params<-extract_parameter_set_dials(rbf_wf) %>%                       #defaults: cost (transformed scale): [-10, 5], margin [0, 0.2]
+              update(rbf_sigma=rbf_sigma(c(-2.5, 0),trans=log10_trans()),
+                     cost=cost(c(-1,5)))
+
+set.seed(123)
+tune_results_rbf<-tune_bayes(rbf_wf,
+                             resamples=resamples,
+                             metrics=model_metrics,
+                             param_info=rbf_params,
+                             iter=50)
+```
+
+```{r}
+#| fig.width: 9
+#| fig.height: 10
+options(scipen=999)
+autoplot(tune_results_rbf)
+```
+
+```{r}
+show_best(tune_results_rbf, metric='roc_auc', n=1)
+finalized_rbf_wf<-rbf_wf %>% 
+                  finalize_workflow(select_best(tune_results_rbf, metric="roc_auc"))
+rbf_model<- finalized_rbf_wf%>%
+            fit(binary_training_data)
+```
+
+Cross-validation
+```{r cross-validation}
+knn_cv <- fit_resamples(tuned_knn_model, resamples, metrics=model_metrics, control=cv_control)
+tuned_logreg_cv <- fit_resamples(tuned_logreg_model, resamples, metrics=model_metrics, control=cv_control)
+rf_cv <- fit_resamples(best_rf_model, resamples, metrics=model_metrics, control=cv_control)
+lin_cv <- fit_resamples(lin_model, resamples, metrics=model_metrics, control=cv_control)
+poly_cv <- fit_resamples(poly_model, resamples, metrics=model_metrics, control=cv_control)
+rbf_cv <- fit_resamples(rbf_model, resamples, metrics=model_metrics, control=cv_control)
+
+#Collect predictions for use in threshold selection
+knn_cv_preds<-collect_predictions(knn_cv)
+tuned_logreg_cv_preds<-collect_predictions(tuned_logreg_cv)
+rf_cv_preds<-collect_predictions(rf_cv)
+lin_cv_preds<-collect_predictions(lin_cv)
+poly_cv_preds<-collect_predictions(poly_cv)
+rbf_cv_preds<-collect_predictions(rbf_cv)
+```
+Metrics Table
+```{r cv-metrics-table}
+cv_metrics <- bind_rows(
+        collect_metrics(logreg_cv) %>% mutate(model="Logistic regression"),
+        collect_metrics(lda_cv) %>% mutate(model="LDA"),
+        collect_metrics(qda_cv) %>% mutate(model="QDA"),
+        collect_metrics(knn_cv) %>% mutate(model="KNN"),
+        collect_metrics(tuned_logreg_cv) %>% mutate(model="Tuned Logistic Regression"),
+        collect_metrics(rf_cv) %>% mutate(model="Random Forest"),
+        collect_metrics(lin_cv) %>% mutate(model="SVM Linear"),
+        collect_metrics(poly_cv) %>% mutate(model="SVM Polynomial"),
+        collect_metrics(rbf_cv) %>% mutate(model="SVM RBF")
+    ) 
+cv_metrics %>% 
+    select(model, .metric, mean) %>%
+    pivot_wider(names_from=".metric", values_from="mean") %>%
+    knitr::kable(caption="Cross-validation performance metrics", digits=5) %>% 
+    kableExtra::kable_styling("striped")
+```
+\
+Visualization of the same data
+```{r cv-metrics-figure}
+#| fig.cap: Cross-validation performance metrics
+#| fig.width: 6
+#| fig.height: 8
+#| out.width: 75%
+ggplot(cv_metrics, aes(x=mean, y=model, xmin=mean-std_err, xmax=mean+std_err)) +
+    geom_point() + 
+    geom_linerange() +
+    facet_wrap(~ .metric)
+```
+
+Overlayed ROC Curves for CV
+```{r cv-roc-curves-overlay}
+#| fig.width: 12
+#| fig.height: 4
+#| fig.cap: Overlay of cross-validation ROC curves
+roc_cv_data <- function(model_cv) {
+    cv_predictions <- collect_predictions(model_cv)
+    cv_predictions %>% 
+        roc_curve(truth=Class, .pred_BlueTarp, event_level="first")
+}
+roc1 = bind_rows(
+    roc_cv_data(knn_cv) %>% mutate(model="KNN"),
+    roc_cv_data(tuned_logreg_cv) %>% mutate(model="Tuned Logistic Regression"),
+    roc_cv_data(rf_cv) %>% mutate(model="Random Forest"),
+    roc_cv_data(lin_cv) %>% mutate(model="SVM Linear"),
+    roc_cv_data(poly_cv) %>% mutate(model="SVM Polynomial"),
+    roc_cv_data(rbf_cv) %>% mutate(model="SVM RBF")
+) %>%
+ggplot(aes(x=1-specificity, y=sensitivity, color=model)) +
+    geom_line()
+roc2 = roc1 + coord_cartesian(xlim=c(0,0.05),ylim=c(0.9,1.0)) +
+  theme(legend.position=c(0.75, 0.25))
+roc1 + roc2 
+```
+
+
+For each model, determine the threshold that maximizes the J-index using the training set. Why is the J-index a better metric than accuracy in this case? 
+```{r}
+#| fig.cap: Table 2
+#| out.width: 75%
+performance_knn<-probably::threshold_perf(knn_cv_preds, Class, .pred_BlueTarp, 
+                 thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                 metrics=metric_set(j_index))
+knn_max_j_index <- performance_knn %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate)) %>% 
+    filter(.threshold == 0.01)                                                  #KNN produces multiple threshold values with the same max(j_)
+
+
+performance_tuned_logreg<-probably::threshold_perf(tuned_logreg_cv_preds, Class, .pred_BlueTarp, 
+                          thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                          metrics=metric_set(j_index))
+tuned_logreg_max_j_index <- performance_tuned_logreg %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+
+performance_rf<-probably::threshold_perf(rf_cv_preds, Class, .pred_BlueTarp, 
+                thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                metrics=metric_set(j_index))
+rf_max_j_index <- performance_rf %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+
+performance_lin<-probably::threshold_perf(lin_cv_preds, Class, .pred_BlueTarp, 
+                 thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                 metrics=metric_set(j_index))
+lin_max_j_index <- performance_lin %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+
+performance_poly<-probably::threshold_perf(poly_cv_preds, Class, .pred_BlueTarp, 
+                  thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                  metrics=metric_set(j_index))
+poly_max_j_index <- performance_poly %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+
+performance_rbf<-probably::threshold_perf(rbf_cv_preds, Class, .pred_BlueTarp, 
+                 thresholds=seq(0.01, 0.99, 0.001), event_level="first",
+                 metrics=metric_set(j_index))
+rbf_max_j_index <- performance_rbf %>% 
+    #filter(.metric == "j_index") %>% 
+    filter(.estimate == max(.estimate))
+
+
+Names<-c("Logistic Regression","LDA","QDA","KNN","Tuned Logistic Regression","Random Forest","SVM Linear","SVM Polynomial","SVM RBF")
+
+metrics_table <- function(metrics, caption) {
+  metrics %>%
+      pivot_wider(names_from=.metric, values_from=.estimate) %>%
+      select(-.estimator) %>%
+      knitr::kable(caption=caption, digits=5) %>%
+      kableExtra::kable_styling(full_width=FALSE)
+}
+
+#Save Threshold values
+knn_thresh<-knn_max_j_index$.threshold 
+tuned_logreg_thresh<-tuned_logreg_max_j_index$.threshold
+rf_thresh<-rf_max_j_index$.threshold
+lin_thresh<-lin_max_j_index$.threshold
+poly_thresh<-poly_max_j_index$.threshold
+rbf_thresh<-rbf_max_j_index$.threshold
+
+metrics_table(bind_cols(Names, bind_rows(logreg_max_j_index,LDA_max_j_index,QDA_max_j_index,knn_max_j_index,tuned_logreg_max_j_index,rf_max_j_index,lin_max_j_index,poly_max_j_index,rbf_max_j_index)),
+              "Thresholds") %>% 
+  kableExtra::kable_styling("striped")
+```
+
+Train Metrics
+```{r}
+#accuracy, sensitivity, specificity, and J-index
+ASSJ2<-bind_rows(calculate_metrics(logreg_fit,binary_training_data,holdout,"Logistic Regression",logreg_thresh),
+                 calculate_metrics(LDA_fit,binary_training_data,holdout,"LDA",LDA_thresh),
+                 calculate_metrics(QDA_fit,binary_training_data,holdout,"QDA",QDA_thresh),
+                 calculate_metrics(tuned_knn_model,binary_training_data,holdout,"KNN",knn_thresh),
+                 calculate_metrics(tuned_logreg_model,binary_training_data,holdout,"Tuned Logistic Regression",tuned_logreg_thresh),
+                 calculate_metrics(best_rf_model,binary_training_data,holdout,"Random Forest",rf_thresh),
+                 calculate_metrics(lin_model,binary_training_data,holdout,"SVM Linear",lin_thresh),
+                 calculate_metrics(poly_model,binary_training_data,holdout,"SVM Polynomial",poly_thresh),
+                 calculate_metrics(rbf_model,binary_training_data,holdout,"SVM RBF",rbf_thresh))
+metrics_table(ASSJ2,"Threshold Metrics") %>% 
+  kableExtra::kable_styling("striped")
+```
+
+```{r}
+#| fig.width: 12
+#| fig.height: 8
+dg1 <- distribution_graph(tuned_knn_model, holdout, "KNN")
+dg2 <- distribution_graph(tuned_logreg_model, holdout, "Tuned Logistic Regression")
+dg3 <- distribution_graph(best_rf_model, holdout, "Random Forest")
+dg4 <- distribution_graph(lin_model, holdout, "SVM Linear")
+dg5 <- distribution_graph(poly_model, holdout, "SVM Polynomial")
+dg6 <- distribution_graph(rbf_model, holdout, "SVM RBF")
+(g1 + g2 + g3) / (dg1 + dg2 + dg3) / (dg4 + dg5 + dg6)
+```
+Proportion of Blue Tarp Identified in Holdout
+```{r}
+holdout_knn<-augment_model(tuned_knn_model,holdout,knn_thresh)
+holdout_tuned_logreg<-augment_model(tuned_logreg_model,holdout,tuned_logreg_thresh)
+holdout_rf<-augment_model(best_rf_model,holdout,rf_thresh)
+holdout_lin<-augment_model(lin_model,holdout,lin_thresh)
+holdout_poly<-augment_model(poly_model,holdout,poly_thresh)
+holdout_rbf<-augment_model(rbf_model,holdout,rbf_thresh)
+
+knn_prop<-nrow(holdout_knn[which(holdout_knn$pred == "BlueTarp"),]) / nrow(holdout_knn)
+tuned_logreg_prop<-nrow(holdout_tuned_logreg[which(holdout_tuned_logreg$pred == "BlueTarp"),]) / nrow(holdout_tuned_logreg)
+rf_prop<-nrow(holdout_rf[which(holdout_rf$pred == "BlueTarp"),]) / nrow(holdout_rf)
+lin_prop<-nrow(holdout_lin[which(holdout_lin$pred == "BlueTarp"),]) / nrow(holdout_lin)
+poly_prop<-nrow(holdout_poly[which(holdout_poly$pred == "BlueTarp"),]) / nrow(holdout_poly)
+rbf_prop<-nrow(holdout_rbf[which(holdout_rbf$pred == "BlueTarp"),]) / nrow(holdout_rbf)
+
+knn_prop
+tuned_logreg_prop
+rf_prop
+lin_prop
+poly_prop
+rbf_prop
+```
+
+```{r}
+data.frame(
+  models = c("Logistic Regression","LDA","QDA","KNN","Tuned Logistic Regression","Random Forest","SVM Linear","SVM Polynomial","SVM RBF"),
+  proportion = c(logreg_prop, LDA_prop, QDA_prop, knn_prop, tuned_logreg_prop, rf_prop, lin_prop, poly_prop, rbf_prop)
+)%>%
+      knitr::kable(caption="Holdout Blue Tarp Proportions", digits=5) %>%
+      kableExtra::kable_styling("striped", full_width=FALSE)
+```
+
+
+```{r}
+#Factor Class for all augmented holdout datasets
+holdout_logreg<-holdout_logreg%>% 
+                mutate(Class=as.factor(Class))
+holdout_LDA<-holdout_LDA%>% 
+            mutate(Class=as.factor(Class))
+holdout_QDA<-holdout_QDA %>% 
+             mutate(Class=as.factor(Class))
+holdout_knn<-holdout_knn %>% 
+             mutate(Class=as.factor(Class))
+holdout_tuned_logreg<-holdout_tuned_logreg%>% 
+                      mutate(Class=as.factor(Class))
+holdout_rf<-holdout_rf%>% 
+            mutate(Class=as.factor(Class))
+holdout_lin<-holdout_lin%>% 
+             mutate(Class=as.factor(Class))
+holdout_poly<-holdout_poly%>% 
+              mutate(Class=as.factor(Class))
+holdout_rbf<-holdout_rbf%>% 
+             mutate(Class=as.factor(Class))
+```
+
+```{r}
+calculate_metrics2 <- function(model, augmented_model, train, test, model_name, thresh_level) {
+    roc_auc(model %>% augment(train), Class, .pred_BlueTarp, event_level="first")
+    bind_rows(
+        bind_cols(
+            model=model_name,
+            dataset="train",
+            class_metrics(model %>% augment_model(train, thresh_level), truth=Class, estimate=pred),
+        ),
+        bind_cols(
+            model=model_name,
+            dataset="train",
+            roc_auc(model %>% augment_model(train, thresh_level), Class, .pred_BlueTarp, event_level="first"),
+        ),
+        bind_cols(
+            model=model_name,
+            dataset="test",
+            class_metrics(augmented_model, truth=Class, estimate=pred),
+        ),
+        bind_cols(
+            model=model_name,
+            dataset="test",
+            roc_auc(augmented_model, Class, .pred_BlueTarp, event_level="first"),
+        ),
+    )
+}
+```
+
+Train and Test Metrics
+```{r}
+complete_performance<-bind_rows(calculate_metrics2(logreg_fit, holdout_logreg, binary_training_data, holdout, "Logistic Regression", logreg_thresh),
+                                calculate_metrics2(LDA_fit, holdout_LDA, binary_training_data, holdout, "LDA", LDA_thresh),
+                                calculate_metrics2(QDA_fit, holdout_QDA, binary_training_data, holdout, "QDA", QDA_thresh),
+                                calculate_metrics2(tuned_knn_model, holdout_knn, binary_training_data, holdout, "KNN", knn_thresh),
+                                calculate_metrics2(tuned_logreg_model, holdout_tuned_logreg, binary_training_data, holdout, "Tuned Logistic Regression", tuned_logreg_thresh),
+                                calculate_metrics2(best_rf_model, holdout_rf, binary_training_data, holdout, "Random Forest", rf_thresh),
+                                calculate_metrics2(lin_model, holdout_lin, binary_training_data, holdout, "SVM Linear", lin_thresh),
+                                calculate_metrics2(poly_model, holdout_poly, binary_training_data, holdout, "SVM Polynomial", poly_thresh),
+                                calculate_metrics2(rbf_model, holdout_rbf, binary_training_data, holdout, "SVM RBF", rbf_thresh))
+metrics_table(complete_performance, "Complete Metrics")%>%
+      kableExtra::kable_styling("striped", full_width=FALSE)
+```
+ 
+Test Metrics Only  
+```{r}
+complete_performance %>%
+      pivot_wider(names_from=.metric, values_from=.estimate) %>%
+      select(-.estimator) %>%
+      filter(dataset=="test") %>% 
+      knitr::kable(caption="Holdout Metrics", digits=5) %>%
+      kableExtra::kable_styling(full_width=FALSE)%>%
+      kableExtra::kable_styling("striped", full_width=FALSE)
+```
+
+Confusion Matrices with thresholds applied
+```{r}
+#| fig.width: 16
+#| fig.height: 8
+cm_logreg<-autoplot(conf_mat(holdout_logreg, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('Logistic Regression with Threshold %.2f', logreg_thresh))
+cm_LDA<-autoplot(conf_mat(holdout_LDA, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('LDA with Threshold %.2f', LDA_thresh))
+cm_QDA<-autoplot(conf_mat(holdout_QDA, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('QDA with Threshold %.2f', QDA_thresh))
+cm_knn<-autoplot(conf_mat(holdout_knn, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('KNN with Threshold %.2f', knn_thresh))
+cm_tuned_logreg<-autoplot(conf_mat(holdout_tuned_logreg, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('Tuned Logistic Regression with Threshold %.2f', tuned_logreg_thresh))
+cm_rf<-autoplot(conf_mat(holdout_rf, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('Random Forest with Threshold %.2f', rf_thresh))
+cm_lin<-autoplot(conf_mat(holdout_lin, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('SVM Linear with Threshold %.2f', lin_thresh))
+cm_poly<-autoplot(conf_mat(holdout_poly, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('SVM Polynomial with Threshold %.2f', poly_thresh))
+cm_rbf<-autoplot(conf_mat(holdout_rbf, truth = Class, estimate = pred), type = 'heatmap') +
+                    labs(title=sprintf('SVM Radial Basis Function with Threshold %.2f', rbf_thresh))
+
+(cm_logreg + cm_LDA + cm_QDA) / (cm_knn + cm_tuned_logreg + cm_rf) / (cm_lin + cm_poly + cm_rbf)
+```
+
+
+
+
+
+
+Stop cluster
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```
