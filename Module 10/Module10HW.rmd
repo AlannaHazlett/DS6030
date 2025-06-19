@@ -1,0 +1,209 @@
+---
+title: "Module 10 HW"
+author: "Alanna Hazlett"
+date: "2024-07-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_chunk$set(cache=TRUE, autodep=TRUE)
+knitr::opts_chunk$set(fig.align="center", fig.pos="tbh")
+```
+
+```{r setup-parallel, include=FALSE}
+#| cache: FALSE
+#| message: false
+library(doParallel)
+cl <- makePSOCKcluster(4)#parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(embed)
+library(GGally)
+library(ggrepel)
+```
+
+
+# Module 10 
+> You can download the R Markdown file (https://gedeck.github.io/DS-6030/homework/Module-10.Rmd) and use it to answer the following questions.
+> 
+> If not otherwise stated, use Tidyverse, Tidymodels, and Tidyclust for the assignments.
+
+## 1. Analyzing the ANES 2022 Pilot Study - PCA {-}
+The ANES 2022 Pilot Study is a cross-sectional survey conducted to test new questions under consideration for potential inclusion in the ANES 2024 Time Series Study and to provide data about voting and public opinion after the 2022 midterm elections in the United States. Information about this study is available at [https://electionstudies.org/data-center/2022-pilot-study/](https://electionstudies.org/data-center/2022-pilot-study/).
+
+Load the data from [https://gedeck.github.io/DS-6030/datasets/anes_pilot_2022_csv_20221214/anes_pilot_2022_csv_20221214.csv](https://gedeck.github.io/DS-6030/datasets/anes_pilot_2022_csv_20221214/anes_pilot_2022_csv_20221214.csv)
+
+The dataset contains information about the respondents profile (e.g. birthyr, gender, race, educ, marstat, ...) and answers to 235 questions from different categories. 
+
+**(a.)** Load and preprocess the data. The data contain answers to 235 questions (see PDF [questionnaire](https://electionstudies.org/wp-content/uploads/2022/11/anes_pilot_2022_questionnaire_20221114.pdf)). The dataset also contains a number of variables that are not questions, but rather contain information about how the survey was conducted (see [user's guide and codebook](https://electionstudies.org/wp-content/uploads/2022/12/anes_pilot_2022_userguidecodebook_20221214.pdf)).
+
+```{r}
+raw_data<-read_csv("https://gedeck.github.io/DS-6030/datasets/anes_pilot_2022_csv_20221214/anes_pilot_2022_csv_20221214.csv")
+```
+
+**(i.)** Identify the feeling thermometer questions. These questions ask respondents to rate their feelings toward a number of groups on a scale from 0 to 100. The questions are listed in variables starting with `ft...`. Identify the names of all feeling thermometer questions ignoring the `ftblack` and `ftwhite` questions as these were only asked based on race of the respondent and therefore contain a large number of missing values. Make sure that you exclude timing (e.g. `ftjourn_page_timing`) and order variables from your analysis.
+
+```{r}
+anes<-dplyr::select(raw_data,starts_with("ft"))
+anes<-anes[,-c(1:4,20:38)]
+```
+
+**(ii.)** If a respondent did not answer a feeling thermometer question, the value is coded as a negative number. Replace the negative values with `NA` and remove all rows that have NA values for _any of the selected feeling thermometer questions_. (see `drop_na` function). You should have about 1560 data points left. You should now have a data frame that is suitable for a principal component analysis of the feeling thermometer responses.
+
+```{r}
+anes <- anes%>%
+        mutate(across(everything(), function(x){replace(x, which(x<0), NA)})) %>% 
+        drop_na()
+```
+
+**(b.)** Perform a principal component analysis of the feeling thermometer responses using `step_pca`. 
+
+```{r}
+pca_rec <- recipe(data = anes, formula = ~ .) %>% 
+                 step_normalize(all_numeric_predictors()) %>% 
+                 step_pca(all_numeric_predictors())
+prep_pca_rec <- pca_rec %>% 
+                prep()
+anes_pca <- prep_pca_rec %>% 
+            bake(new_data = NULL)
+```
+
+
+**(i.)** Create a scree plot of the eigenvalues. How many components should be considered? 
+
+```{r}
+#| fig.width: 4
+#| fig.height: 4
+#| fig.cap: Pareto chart
+explained_var <-  tidy((pca_rec %>% prep())$steps[[2]], type="variance")
+perc_var <- explained_var %>% filter(terms=="percent variance") 
+cum_perc_var <- explained_var %>% filter(terms=="cumulative percent variance") 
+ggplot(explained_var, aes(x=component, y=value)) +
+    geom_bar(data=perc_var, stat = "identity") +
+    geom_line(data=cum_perc_var) +
+    geom_point(data=cum_perc_var, size=2) +
+    labs(x="Principal component", y="Percent variance")
+```
+
+
+**(ii.)** Create a biplot using the first two components. You will need to multiply the loadings to get an improved visualization. 
+
+```{r}
+#| fig.width: 8
+#| fig.height: 8
+#| fig.cap: PCA Biplot
+loadings <-  tidy((pca_rec %>% prep())$steps[[2]], type="coef") %>%
+             pivot_wider(id_cols="terms", names_from="component", values_from="value")
+anes_pca %>%
+    ggplot(aes(x=PC1, y=PC2)) +
+    geom_point() + 
+    geom_segment(data=loadings, aes(xend=10*PC1, yend=10*PC2, x=0, y=0), 
+                 arrow = arrow(length=unit(0.15, 'cm')),
+                 color = "red") +
+    geom_label_repel(data=loadings, aes(x=10*PC1, y=10*PC2, label=terms),
+             hjust="left", size=3)
+```
+
+
+**(iii.)** Interpret the first two components. What do they represent? Check the questionnaire for the questions that were asked.
+
+
+>PC1 is a linear combination of coefficients of the variables that are roughly parallel to it's horizontal axis, such as ftbiden, ftdem, ftfem, ftfbi, ftjourn, and fttrans. It shows the differences between Republicans and Democrats. The second principle component is a linear combination of coefficients of the variables that are roughly parallel to it's vertical axis, such as ftmen, and ftasian. This is the separation between social acceptance. 
+
+**(c.)** We can map the respondents profile and responses to other questions onto the principal component scatterplot. We start with the respondents profile.
+**(i.)** Select the following profile data:
+        - gender 
+        - educ (education level)
+        - marstat (marital status)
+        
+        Add steps to convert the columns into factors in your data processing pipeline. See the questionnaire for the meaning of the different factor levels. 
+        
+        
+*gender: 1 - male, 2 - female*
+*educ: 1 - No high school, 2 - High school graduate, 3 - Some college, 4 - 2 year degree, 5 - 4 year degree, 6 - post graduate*
+*marstat: 1 - Married, 2 - Separated, 3 - Divorced, 4 - Widowed, 5 - Never married, 6 - Domestic/civil partnership*
+
+```{r}
+profile <- raw_data %>% 
+           dplyr::select("gender","educ","marstat") %>% 
+           mutate(gender = factor(gender),
+                  educ = factor(educ),
+                  marstat = factor(marstat))
+```
+
+**(ii.)** Combine the data set with the transformed PCA values.
+
+**(iii.)** Create scatterplots of the first two components and color the points by the factor levels of the three questions.
+
+**(iv.)** Create scatterplots of the first two components, add a `geom_density2d` layer, and use `facet_wrap` to create a separate plot for each factor level. 
+    
+**(v.)** Interpret the results. Can you see patterns? Which visualization is easier to analyze?
+
+**(d.)** As an extension of (c), we now focus on the answers to the actual questions. Select one of the question categories, formulate an hypothesis and see if you find a correlation with the PCA analysis. The categories are:
+
+    - 2022 Turnout and choice (6-20)
+    - Retrospective turnout and choice 2020 (21-24)
+    - Prospective turnout (25)
+    - Participation (26-33)
+    - Global emotion battery (34-40)
+    - Presidential approval (41-43)
+    - Party identification (44-50)
+    - Ideology (51)
+    - Economic performance (52-54)
+    - Inflation (55-64)
+    - Issue importance (65-79)
+    - Issue ownership (80-92)
+    - Climate change (93-94)
+    - Trust in experts (95-99)
+    - Political disagreement (100-101)
+    - Abortion (102-114)
+    - Abortion emotions (102-114)
+    - Transgender attitudes (123-126)
+    - Guns and crime (127-129)
+    - Imigrant emotions (130-136)
+    - Democratic attitudes / misinformation (137-146)
+    - Electoral integrity (147-159)
+    - Political efficacy (160)
+    - Feeling thermometers (161-179)
+    - Racism (180)
+    - Feminist attitudes (181-185)
+    - Racial resentment (186-190)
+    - Political tolerance (191-193)
+    - Racial stereotypes (194-206)
+    - Identities (207-208)
+    - Identity importance (210-220)
+    - Role of schools (221-226)
+    - Great replacement (227)
+    - Racial privilege (228-235)
+
+    Use a similar approach to (c) for the analysis
+
+
+
+## 2. Analyzing the ANES 2022 Pilot Study - Clustering {-}
+We continue with the analysis of the ANES 2022 Pilot study and cluster the respondents based on their answers to the feeling thermometer questions.
+
+**(a.)** Create a hierarchical clustering using the feeling thermometer data with the `tidyclust` package. Explore a variety of clustering methods ([hier_clust](https://tidyclust.tidymodels.org/reference/hier_clust.html)). How many clusters should be considered?
+
+**(b.)** Use k-means clustering to cluster the respondents based on their answers to the feeling thermometer questions. Use the `tidyclust` package. 
+
+**(i.)** Create a k-means clustering with 5 clusters.
+
+**(ii.)** Combine the dataset, the results from the PCA, and the k-means clustering in a tibble. (_Hint_: add to result from step 1.c.ii)
+
+**(iii.)** Create a scatterplot of the first two principal components and color the points by the cluster assignment. Describe your observations.
+
+**(iv.)** Applying the `tidy` command to the fitted k-means model extracts the cluster centroids. Visualize the cluster centers in a parallel coordinate plot and interpret the different clusters. It can be helpful to order the variables for the visualization (use `scale_x_discrete(limits=c("fttrans", "ftfem", ...))` where the order is defined by the `limits` argument). 
+    
+        Characterize the different clusters. 
+
+**(c.)** Use the profile data from 1.c.i to characterize the different clusters. You can for example visualize the distributions of the different factor levels in a stacked 100%-bar plot (`geom_bar(position="fill")`). How does the distribution of the different factor levels differ between the clusters? Are your observations in agreement with the analysis from 1.c.i?
+
+**(d.)** Now use the questions from 1.d to characterize the different clusters. How does the distribution of the different factor levels differ between the clusters? Are your observations in agreement with the analysis from 1.d?
